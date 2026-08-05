@@ -116,6 +116,7 @@
   </style>
 </head>
 <body class="min-h-screen pb-24 text-gray-800 bg-gray-100">
+  <div class="bg-emerald-600 text-white text-center text-xs font-bold py-1.5 sticky top-0 z-[100]">🧪 TEST ENVIRONMENT — Separate Data From Your Real App</div>
 
   <!-- Header -->
   <header class="px-4 py-2.5 border-b border-gray-200 bg-white sticky top-0 z-30 flex justify-between items-center shadow-sm max-w-md mx-auto">
@@ -1181,7 +1182,7 @@
       debtPaymentOverrides: {}
     };
 
-    const STORAGE_KEY = 'ledger_v6_full_state';
+    const STORAGE_KEY = 'ledger_v6_full_state_TEST';
     const VIEW_STATE_KEY = 'ledger_view_state_v1';
     let state = DEMO_STATE;
     let activeTab = 'forecast';
@@ -1219,7 +1220,7 @@
     // Nothing here is committed to source or shared between users. The config
     // and sync code are only ever stored in this device's localStorage, entered
     // by hand in Settings. Without that config, none of this code does anything.
-    const SYNC_CONFIG_KEY = 'ledger_sync_config';
+    const SYNC_CONFIG_KEY = 'ledger_sync_config_TEST';
     const SYNC_META_KEY = 'ledger_sync_meta';
     let syncConfig = null;
     let firebaseApp = null;
