@@ -386,6 +386,7 @@
             <input id="payoffExtraMonthlyInput" type="number" min="0" step="10" value="0" onchange="updatePayoffExtraMonthly(this.value)" class="flex-1 bg-gray-50 border border-gray-300 rounded-lg p-2 text-xs font-mono text-gray-800">
           </div>
           <p class="text-[10px] text-gray-400">Applied to whichever debt is first in the order below. As each debt is paid off, its minimum rolls into the extra amount for the next one (classic snowball/avalanche behavior).</p>
+          <p class="text-[10px] text-amber-700 italic">This and the rollover math below are sandbox-only for now — they shape the payoff date/interest estimates here but don't touch your Cash or Debt calendars yet. Lump sums (below) can be pushed onto your real calendars individually.</p>
         </div>
 
         <!-- Auto-suggested opportunities -->
@@ -412,6 +413,7 @@
           </div>
           <div id="payoffLumpSumsList" class="space-y-2"></div>
           <p id="payoffLumpSumEmptyHint" class="text-[10px] text-gray-400 italic">None yet — accept a suggestion above, or add one manually for something like a tax refund.</p>
+          <p class="text-[10px] text-gray-400 italic">Pick a specific debt (not "Whichever's next"), then hit "Apply to forecast" to post it as a real transaction on your Cash calendar (money out) and Debt calendar (balance down) — both editable and deletable right there, and it'll stay in sync with this row.</p>
         </div>
 
         <!-- Order / per-debt breakdown -->
@@ -3329,7 +3331,14 @@
       } else {
         if (id) {
           const idx = state.transactions.findIndex(x => x.id === id);
-          if (idx !== -1) state.transactions[idx] = data;
+          if (idx !== -1) {
+            const old = state.transactions[idx];
+            if (old.linkedLumpSumId) {
+              data.linkedLumpSumId = old.linkedLumpSumId;
+              syncLumpSumFromTransaction(old.linkedLumpSumId, data);
+            }
+            state.transactions[idx] = data;
+          }
         } else {
           state.transactions.push(data);
         }
@@ -3337,9 +3346,37 @@
 
       closeModal('transactionModal');
       saveState();
+      renderPayoffPlanner();
+    }
+
+    // When you edit an applied lump sum's date/amount from the calendar or
+    // log (rather than the Payoff tab), push that change back to the lump
+    // sum entry and its sibling transaction so both sides stay identical.
+    function syncLumpSumFromTransaction(lumpSumId, changedTx) {
+      const ls = (state.payoffLumpSums || []).find(x => x.id === lumpSumId);
+      if (!ls || !ls.appliedPairId) return;
+      ls.date = changedTx.date;
+      ls.amount = changedTx.amount;
+      const siblingSuffix = changedTx.id.endsWith('-cash') ? '-debt' : '-cash';
+      const sibling = state.transactions.find(x => x.id === ls.appliedPairId + siblingSuffix);
+      if (sibling) { sibling.date = changedTx.date; sibling.amount = changedTx.amount; }
     }
 
     function deleteTransaction(id) {
+      const t = state.transactions.find(x => x.id === id);
+
+      // Deleting either side of an applied lump sum (from the calendar or the
+      // log) deletes the whole lump sum: both linked transactions come out,
+      // and the Payoff Planner drops it and recalculates — matching what you
+      // see happen to your checking/debt balances.
+      if (t && t.linkedLumpSumId) {
+        state.transactions = state.transactions.filter(x => x.linkedLumpSumId !== t.linkedLumpSumId);
+        state.payoffLumpSums = (state.payoffLumpSums || []).filter(x => x.id !== t.linkedLumpSumId);
+        saveState();
+        renderPayoffPlanner();
+        return;
+      }
+
       state.transactions = state.transactions.filter(t => t.id !== id);
       saveState();
     }
@@ -4046,11 +4083,113 @@
       const ls = state.payoffLumpSums.find(x => x.id === id);
       if (!ls) return;
       ls[field] = field === 'amount' ? (parseFloat(val) || 0) : val;
+
+      // Keep the two linked real transactions (cash-out + debt-paydown) in sync
+      // if this lump sum is currently applied to the actual forecast.
+      if (ls.applied && ls.appliedPairId) {
+        if (field === 'date' || field === 'amount') {
+          const cashTx = state.transactions.find(t => t.id === ls.appliedPairId + '-cash');
+          const debtTx = state.transactions.find(t => t.id === ls.appliedPairId + '-debt');
+          const amt = parseFloat(ls.amount) || 0;
+          if (cashTx) { cashTx.date = ls.date; cashTx.amount = amt; }
+          if (debtTx) { debtTx.date = ls.date; debtTx.amount = amt; }
+        }
+        if (field === 'debtId') {
+          if (!ls.debtId || ls.debtId === 'next') {
+            // Can't apply a "whichever's next" lump sum as a real transaction —
+            // a real transaction has to hit one specific debt account. Un-apply it.
+            removeLumpSumTransactions(ls);
+            ls.applied = false;
+            ls.appliedPairId = null;
+          } else {
+            const debtTx = state.transactions.find(t => t.id === ls.appliedPairId + '-debt');
+            if (debtTx) debtTx.accountId = `debt-${ls.debtId}`;
+          }
+        }
+      }
+
+      saveState();
+      renderPayoffPlanner();
+    }
+
+    // Removes the pair of real transactions (if any) backing an applied lump sum,
+    // without touching the lump sum entry itself.
+    function removeLumpSumTransactions(ls) {
+      if (!ls || !ls.appliedPairId) return;
+      state.transactions = state.transactions.filter(t => t.linkedLumpSumId !== ls.id);
+    }
+
+    // Pushes a lump sum out of the sandbox and onto the real Cash + Debt
+    // calendars as two linked transactions: money leaving the cash account,
+    // and that same amount paying down the target debt's balance. Both are
+    // ordinary transactions — visible, editable, and deletable from the
+    // calendar like anything else — tagged with linkedLumpSumId so edits or
+    // deletes there sync back here.
+    function applyLumpSumToForecast(id) {
+      const ls = state.payoffLumpSums.find(x => x.id === id);
+      if (!ls) return;
+      const amt = parseFloat(ls.amount) || 0;
+      if (!ls.date || amt <= 0) {
+        alert('Set a date and an amount above zero before applying this to your forecast.');
+        return;
+      }
+      if (!ls.debtId || ls.debtId === 'next') {
+        alert('Pick a specific debt for this lump sum first — "Whichever\'s next" only makes sense inside the sandbox simulation. A real transaction has to hit one specific account.');
+        return;
+      }
+      if (!state.accounts || state.accounts.length === 0) {
+        alert('Add a cash account first (Accounts tab) — the lump sum needs somewhere to pull the money from.');
+        return;
+      }
+      const cashAccount = state.accounts[0];
+      const pairId = 'payofflump-' + ls.id;
+      const debtName = getAccountName(`debt-${ls.debtId}`);
+
+      state.transactions.push({
+        id: pairId + '-cash',
+        desc: `Lump Sum Payoff (${debtName})`,
+        amount: amt,
+        category: 'Debts',
+        type: 'expense',
+        accountId: cashAccount.id,
+        date: ls.date,
+        isPaid: false,
+        linkedLumpSumId: ls.id
+      });
+      state.transactions.push({
+        id: pairId + '-debt',
+        desc: `Lump Sum Payoff Applied`,
+        amount: amt,
+        category: 'Debts',
+        type: 'income',
+        accountId: `debt-${ls.debtId}`,
+        date: ls.date,
+        isPaid: false,
+        linkedLumpSumId: ls.id
+      });
+
+      ls.applied = true;
+      ls.appliedPairId = pairId;
+      saveState();
+      renderPayoffPlanner();
+    }
+
+    // Pulls an applied lump sum back into the sandbox — deletes the two linked
+    // transactions but keeps the lump sum itself in the planner so you can
+    // keep tweaking it without losing the idea.
+    function unapplyLumpSumFromForecast(id) {
+      const ls = state.payoffLumpSums.find(x => x.id === id);
+      if (!ls) return;
+      removeLumpSumTransactions(ls);
+      ls.applied = false;
+      ls.appliedPairId = null;
       saveState();
       renderPayoffPlanner();
     }
 
     function deletePayoffLumpSum(id) {
+      const ls = state.payoffLumpSums.find(x => x.id === id);
+      if (ls) removeLumpSumTransactions(ls);
       state.payoffLumpSums = state.payoffLumpSums.filter(x => x.id !== id);
       saveState();
       renderPayoffPlanner();
@@ -4164,17 +4303,27 @@
       } else {
         lumpHint.classList.add('hidden');
         lumpList.innerHTML = lumpSums.map(ls => `
-          <div class="grid grid-cols-12 gap-1.5 items-center">
-            <input type="date" value="${ls.date}" onchange="updatePayoffLumpSum('${ls.id}','date',this.value)" class="col-span-4 bg-gray-50 border border-gray-300 rounded-lg p-1.5 text-[11px] text-gray-800">
-            <div class="col-span-3 flex items-center bg-gray-50 border border-gray-300 rounded-lg px-1.5">
-              <span class="text-gray-500 text-[11px]">$</span>
-              <input type="number" min="0" step="10" value="${ls.amount}" onchange="updatePayoffLumpSum('${ls.id}','amount',this.value)" class="w-full bg-transparent p-1.5 text-[11px] text-gray-800">
+          <div class="p-1.5 rounded-lg ${ls.applied ? 'bg-emerald-50 border border-emerald-300' : ''}">
+            <div class="grid grid-cols-12 gap-1.5 items-center">
+              <input type="date" value="${ls.date}" onchange="updatePayoffLumpSum('${ls.id}','date',this.value)" class="col-span-4 bg-gray-50 border border-gray-300 rounded-lg p-1.5 text-[11px] text-gray-800">
+              <div class="col-span-3 flex items-center bg-gray-50 border border-gray-300 rounded-lg px-1.5">
+                <span class="text-gray-500 text-[11px]">$</span>
+                <input type="number" min="0" step="10" value="${ls.amount}" onchange="updatePayoffLumpSum('${ls.id}','amount',this.value)" class="w-full bg-transparent p-1.5 text-[11px] text-gray-800">
+              </div>
+              <select onchange="updatePayoffLumpSum('${ls.id}','debtId',this.value)" class="select-custom col-span-4 bg-gray-50 border border-gray-300 rounded-lg p-1.5 text-[11px] text-gray-800">
+                <option value="next" ${ls.debtId === 'next' ? 'selected' : ''}>Whichever's next</option>
+                ${active.map(d => `<option value="${d.id}" ${ls.debtId === d.id ? 'selected' : ''}>${d.name}</option>`).join('')}
+              </select>
+              <button onclick="deletePayoffLumpSum('${ls.id}')" title="Delete this lump sum entirely" class="col-span-1 text-gray-400 hover:text-red-600 text-center"><i class="fa-solid fa-trash text-[11px]"></i></button>
             </div>
-            <select onchange="updatePayoffLumpSum('${ls.id}','debtId',this.value)" class="select-custom col-span-4 bg-gray-50 border border-gray-300 rounded-lg p-1.5 text-[11px] text-gray-800">
-              <option value="next" ${ls.debtId === 'next' ? 'selected' : ''}>Whichever's next</option>
-              ${active.map(d => `<option value="${d.id}" ${ls.debtId === d.id ? 'selected' : ''}>${d.name}</option>`).join('')}
-            </select>
-            <button onclick="deletePayoffLumpSum('${ls.id}')" class="col-span-1 text-gray-400 hover:text-red-600 text-center"><i class="fa-solid fa-trash text-[11px]"></i></button>
+            <div class="flex items-center justify-between mt-1 pl-0.5">
+              ${ls.applied
+                ? `<span class="text-[9px] font-bold text-emerald-700 uppercase"><i class="fa-solid fa-check"></i> On your Cash &amp; Debt calendars</span>
+                   <button onclick="unapplyLumpSumFromForecast('${ls.id}')" class="text-[9px] font-semibold text-gray-500 hover:text-gray-800 underline">Remove from forecast</button>`
+                : `<span class="text-[9px] text-gray-400">Sandbox only — not on your calendars yet</span>
+                   <button onclick="applyLumpSumToForecast('${ls.id}')" class="text-[9px] font-semibold text-amber-700 hover:text-amber-900 underline">Apply to forecast</button>`
+              }
+            </div>
           </div>
         `).join('');
       }
