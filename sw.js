@@ -1,9 +1,18 @@
-const CACHE_NAME = 'ledger-cache-v20';
+const CACHE_NAME = 'ledger-cache-v26';
 const CORE_ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './notification-badge.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS))
+    caches.open(CACHE_NAME).then((cache) =>
+      // Force a real network fetch for each core asset, bypassing the browser's
+      // HTTP cache. cache.addAll() alone does a plain fetch() under the hood,
+      // which can silently hand back a stale cached copy of index.html even
+      // during an "update" — this is why updates weren't reliably reaching
+      // the phone before. { cache: 'reload' } skips that.
+      Promise.all(CORE_ASSETS.map((url) =>
+        fetch(url, { cache: 'reload' }).then((response) => cache.put(url, response))
+      ))
+    )
   );
   self.skipWaiting();
 });
